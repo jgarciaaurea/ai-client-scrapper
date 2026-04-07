@@ -34,10 +34,13 @@ class Lead(Base):
     keyword = Column(String(100), nullable=True)
     fecha_scraping = Column(DateTime, default=datetime.utcnow, nullable=False)
     
-    # Nuevos campos de subvenciones
+    # Campos de subvenciones
     total_subvenciones = Column(Float, default=0.0, nullable=True)
     num_concesiones = Column(Integer, default=0, nullable=True)
     es_prioritario = Column(Boolean, default=False, nullable=True)
+    
+    # Campo de seguimiento comercial
+    contactado = Column(Boolean, default=False, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("nombre", "fuente", name="uq_nombre_fuente"),
@@ -46,7 +49,7 @@ class Lead(Base):
     def __repr__(self) -> str:
         return (
             f"<Lead id={self.id} nombre='{self.nombre}' "
-            f"web='{self.web}' email='{self.email}'>"
+            f"web='{self.web}' email='{self.email}' contactado={self.contactado}>"
         )
 
     def to_dict(self) -> dict:
@@ -64,6 +67,7 @@ class Lead(Base):
             "total_subvenciones": self.total_subvenciones,
             "num_concesiones": self.num_concesiones,
             "es_prioritario": self.es_prioritario,
+            "contactado": self.contactado,
         }
 
 
