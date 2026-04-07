@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  scrapper:
+    build: .
+    container_name: ai-client-scrapper
+    restart: "no" # Se ejecuta bajo demanda o mediante cron en el host
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    # Descomenta las siguientes líneas si quieres programar ejecuciones periódicas
+    # desde el host usando: docker-compose up
+    # O usa un servicio de cron externo
