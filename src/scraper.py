@@ -1,7 +1,7 @@
 """
 scraper.py
 ----------
-Script principal de scraping con navegación profunda optimizada.
+Script principal de scraping con navegación profunda y prioridad legal.
 """
 
 import os
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.models import init_db
 from src.utils import (
     setup_logger, save_lead, export_to_csv, clean_text, 
-    extract_emails, extract_nifs, normalize_url
+    extract_emails, extract_nifs, normalize_url, validate_spanish_id
 )
 
 # ─────────────────────────────────────────────
@@ -47,8 +47,11 @@ logger = setup_logger(LOG_DIR)
 
 
 # ─────────────────────────────────────────────
-# Helpers de Navegación Profunda Optimizado
+# Helpers de Navegación Profunda
 # ─────────────────────────────────────────────
+
+LEGAL_KEYWORDS = ["aviso legal", "legal notice", "privacidad", "privacy", "rgpd", "lopd", "quienes somos"]
+CONTACT_KEYWORDS = ["contacto", "contact"]
 
 def random_delay(min_s: float = 1.0, max_s: float = 2.0) -> None:
     time.sleep(random.uniform(min_s, max_s))
@@ -56,59 +59,74 @@ def random_delay(min_s: float = 1.0, max_s: float = 2.0) -> None:
 
 def deep_extract_from_website(page: Page, web_url: str) -> Dict[str, Optional[str]]:
     """
-    Navega de forma rápida y robusta buscando NIF y Email en la Home y páginas clave.
+    Navega por la web buscando NIF y Email con prioridad absoluta a páginas legales.
     """
     results = {"email": None, "nif": None}
     if not web_url or not web_url.startswith("http"):
         return results
 
     try:
-        # 1. Visitar Home con timeout corto
+        # 1. Visitar Home
         logger.debug(f"Deep Scraping Home: {web_url}")
-        page.goto(web_url, timeout=12_000, wait_until="domcontentloaded")
+        page.goto(web_url, timeout=15_000, wait_until="domcontentloaded")
         random_delay(0.5, 1.0)
         html_home = page.content()
         
-        emails = extract_emails(html_home)
-        nifs = extract_nifs(html_home)
+        emails_home = extract_emails(html_home)
+        nifs_home = extract_nifs(html_home)
         
-        if emails: results["email"] = emails[0]
-        if nifs: results["nif"] = nifs[0]
+        if emails_home: results["email"] = emails_home[0]
+        if nifs_home: results["nif"] = nifs_home[0]
 
-        # Si ya tenemos todo, no seguimos
-        if results["email"] and results["nif"]:
-            return results
-
-        # 2. Buscar enlaces clave: Aviso Legal o Contacto
-        # Limitamos a los 2 enlaces más probables
-        legal_links = page.evaluate("""
+        # 2. Buscar enlaces legales y de contacto
+        all_links = page.evaluate("""
             () => {
-                const keywords = ['aviso legal', 'legal notice', 'contacto', 'contact', 'privacidad', 'privacy'];
                 const links = Array.from(document.querySelectorAll('a'));
-                return links
-                    .filter(a => keywords.some(k => a.innerText.toLowerCase().includes(k)))
-                    .map(a => a.href)
-                    .filter(href => href && href.startsWith('http'))
-                    .slice(0, 2);
+                return links.map(a => ({
+                    text: a.innerText.toLowerCase(),
+                    href: a.href
+                })).filter(l => l.href && l.href.startsWith('http'));
             }
         """)
         
-        for link in set(legal_links):
-            if results["email"] and results["nif"]:
-                break
+        legal_links = [l['href'] for l in all_links if any(k in l['text'] for k in LEGAL_KEYWORDS)]
+        contact_links = [l['href'] for l in all_links if any(k in l['text'] for k in CONTACT_KEYWORDS)]
+        
+        # Prioridad 1: Aviso Legal (Máxima fiabilidad para CIF)
+        for link in set(legal_links[:2]):
             try:
-                logger.debug(f"Deep Scraping Link: {link}")
+                logger.debug(f"Deep Scraping Legal: {link}")
                 page.goto(link, timeout=10_000, wait_until="domcontentloaded")
                 random_delay(0.5, 1.0)
-                html_page = page.content()
+                html_legal = page.content()
                 
-                new_emails = extract_emails(html_page)
-                new_nifs = extract_nifs(html_page)
+                nifs_legal = extract_nifs(html_legal)
+                emails_legal = extract_emails(html_legal)
                 
-                if not results["email"] and new_emails: results["email"] = new_emails[0]
-                if not results["nif"] and new_nifs: results["nif"] = new_nifs[0]
-            except Exception:
+                # Sobrescribimos si encontramos algo en el Aviso Legal (es más fiable)
+                if nifs_legal: 
+                    results["nif"] = nifs_legal[0]
+                    logger.debug(f"NIF encontrado en página legal: {results['nif']}")
+                if emails_legal: results["email"] = emails_legal[0]
+                
+                if results["nif"]: break # Si ya tenemos NIF de aviso legal, paramos
+            except:
                 continue
+
+        # Prioridad 2: Contacto (Fiabilidad para Email)
+        if not results["email"]:
+            for link in set(contact_links[:2]):
+                try:
+                    logger.debug(f"Deep Scraping Contact: {link}")
+                    page.goto(link, timeout=10_000, wait_until="domcontentloaded")
+                    random_delay(0.5, 1.0)
+                    html_contact = page.content()
+                    emails_contact = extract_emails(html_contact)
+                    if emails_contact:
+                        results["email"] = emails_contact[0]
+                        break
+                except:
+                    continue
 
     except Exception as exc:
         logger.debug(f"Error en deep_extract '{web_url}': {exc}")
@@ -127,39 +145,39 @@ def scrape_paginas_amarillas(page: Page, session, keyword: str, max_pages: int) 
 
     for page_num in range(1, max_pages + 1):
         url = f"https://www.paginasamarillas.es/search/{keyword_slug}/all-ma/all-pr/all-is/all-ci/all-ba/all-pu/all-nc/{page_num}?what={keyword.replace(' ', '+')}&qc=true"
-        logger.info(f"[{source}] Procesando listado página {page_num}")
+        logger.info(f"[{source}] Listado página {page_num}")
 
         try:
             page.goto(url, timeout=25_000, wait_until="domcontentloaded")
-            random_delay(2, 3)
-            page.wait_for_selector("div.listado-item", timeout=10_000)
+            random_delay(1, 2)
+            card_selector = "div.listado-item, article.advert-item, div[id^='advert-']"
+            page.wait_for_selector(card_selector, timeout=10_000)
             
             cards = page.evaluate("""
                 () => {
-                    return Array.from(document.querySelectorAll('div.listado-item')).map(card => {
-                        const h2 = card.querySelector('h2');
-                        const webEl = card.querySelector('a.web');
+                    const items = document.querySelectorAll('div.listado-item, article.advert-item, div[id^="advert-"]');
+                    return Array.from(items).map(card => {
+                        const h2 = card.querySelector('h2, .business-name, a[title]');
+                        const webEl = card.querySelector('a.web, a[href*="http"]:not([href*="paginasamarillas"])');
                         return {
                             nombre: h2 ? h2.innerText.replace('+info','').trim() : '',
                             web: webEl ? webEl.href : ''
                         };
-                    }).filter(d => d.nombre.length > 0);
+                    }).filter(d => d.nombre.length > 2);
                 }
             """)
             raw_leads.extend(cards)
-            
-            if not page.query_selector('a[rel="next"]'):
-                break
+            if not page.query_selector('a[rel="next"], .pagination-next'): break
         except Exception as e:
             logger.warning(f"[{source}] Error en página {page_num}: {e}")
             break
 
     total_saved = 0
-    for data in raw_leads:
+    unique_raw = {d['nombre']: d for d in raw_leads}.values()
+    
+    for data in unique_raw:
         web_url = normalize_url(data.get("web"))
         deep_data = {"email": None, "nif": None}
-        
-        # Solo hacemos deep scraping si hay web y faltan datos
         if web_url:
             deep_data = deep_extract_from_website(page, web_url)
         
@@ -171,31 +189,25 @@ def scrape_paginas_amarillas(page: Page, session, keyword: str, max_pages: int) 
             "fuente": source,
             "keyword": keyword
         }
-        
         if save_lead(session, lead_final, logger):
             total_saved += 1
-            
     return total_saved
 
 
 def run_all_scrapers():
     logger.info("="*60)
-    logger.info(f"INICIANDO SCRAPER OPTIMIZADO - KEYWORD: {KEYWORD}")
+    logger.info(f"INICIANDO SCRAPER CON PRIORIDAD LEGAL - KEYWORD: {KEYWORD}")
     logger.info("="*60)
-    
     session = init_db(DATABASE_URL)
-    
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
         context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
         page = context.new_page()
-        
         try:
             count = scrape_paginas_amarillas(page, session, KEYWORD, MAX_PAGES)
             logger.info(f"Proceso finalizado. Total leads guardados/actualizados: {count}")
         finally:
             browser.close()
-    
     export_to_csv(session, str(PROJECT_ROOT / "data" / "leads.csv"), logger)
     session.close()
 

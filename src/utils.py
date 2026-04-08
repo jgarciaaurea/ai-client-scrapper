@@ -2,7 +2,7 @@
 utils.py
 --------
 Utilidades compartidas: configuración de logging, limpieza de datos,
-extracción avanzada con Regex y exportación a CSV.
+extracción avanzada con Regex y validación de algoritmo de control (CIF/NIF).
 """
 
 import logging
@@ -23,9 +23,7 @@ from src.models import Lead
 # ─────────────────────────────────────────────
 
 def setup_logger(log_dir: str = "logs", level: int = logging.INFO) -> logging.Logger:
-    """
-    Configura un logger con salida a consola y archivo rotativo.
-    """
+    """Configura un logger con salida a consola y archivo rotativo."""
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     log_path = os.path.join(log_dir, "scraper.log")
 
@@ -52,7 +50,62 @@ def setup_logger(log_dir: str = "logs", level: int = logging.INFO) -> logging.Lo
 
 
 # ─────────────────────────────────────────────
-# Extracción y Limpieza Avanzada
+# Validación de Algoritmo de Control (NIF/CIF)
+# ─────────────────────────────────────────────
+
+def validate_spanish_id(id_str: str) -> bool:
+    """
+    Valida el formato y el dígito de control de un NIF/CIF/NIE español.
+    """
+    id_str = id_str.upper().replace("-", "").replace(".", "").replace(" ", "")
+    if len(id_str) != 9:
+        return False
+
+    # NIE: Cambiar X, Y, Z por 0, 1, 2
+    nie_prefix = {"X": "0", "Y": "1", "Z": "2"}
+    if id_str[0] in nie_prefix:
+        temp_id = nie_prefix[id_str[0]] + id_str[1:]
+    else:
+        temp_id = id_str
+
+    # Patrón NIF (Persona física): 8 números + 1 letra
+    if re.match(r"^\d{8}[A-Z]$", temp_id):
+        letras = "TRWAGMYFPDXBNJZSQVHLCKE"
+        return letras[int(temp_id[:8]) % 23] == temp_id[8]
+
+    # Patrón CIF (Persona jurídica): 1 letra + 7 números + 1 control (letra o número)
+    if re.match(r"^[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]$", id_str):
+        # Algoritmo de control CIF
+        letter = id_str[0]
+        digits = [int(d) for d in id_str[1:8]]
+        
+        # Suma de posiciones pares
+        even_sum = digits[1] + digits[3] + digits[5]
+        
+        # Suma de posiciones impares multiplicadas por 2 (y sumando sus dígitos si > 9)
+        odd_sum = 0
+        for i in [0, 2, 4, 6]:
+            prod = digits[i] * 2
+            odd_sum += (prod // 10) + (prod % 10)
+        
+        total_sum = even_sum + odd_sum
+        control_digit = (10 - (total_sum % 10)) % 10
+        control_letter = "JABCDEFGHI"[control_digit]
+        
+        last_char = id_str[8]
+        # Dependiendo de la letra inicial, el control puede ser letra, número o ambos
+        if letter in "ABEH": # Solo número
+            return last_char == str(control_digit)
+        elif letter in "PQSW": # Solo letra
+            return last_char == control_letter
+        else: # Ambos válidos
+            return last_char == str(control_digit) or last_char == control_letter
+
+    return False
+
+
+# ─────────────────────────────────────────────
+# Extracción y Limpieza
 # ─────────────────────────────────────────────
 
 def clean_text(text: Optional[str]) -> Optional[str]:
@@ -62,37 +115,49 @@ def clean_text(text: Optional[str]) -> Optional[str]:
     return re.sub(r"\s+", " ", text.strip()) or None
 
 
+def normalize_text_for_cif(text: str) -> str:
+    """Normalización profunda para facilitar la detección de CIFs."""
+    text = text.upper().replace("\xa0", " ")
+    text = re.sub(r'(\d)\.(\d)', r'\1\2', text)
+    text = re.sub(r'(\d)\s+(?=\d)', r'\1', text)
+    text = re.sub(r'([A-Z])\s*[-—·\.]\s*(\d)', r'\1\2', text)
+    text = re.sub(r'(\d)\s*[-—·\.]\s*([A-Z])', r'\1\2', text)
+    return text
+
+
 def extract_emails(text: Optional[str]) -> List[str]:
     """Extrae todos los emails únicos encontrados en un texto."""
     if not text:
         return []
     pattern = r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
     matches = re.findall(pattern, text)
-    return list(set(m.lower() for m in matches))
+    cleaned = [m.lower() for m in matches if not any(x in m.lower() for x in ['.png', '.jpg', '.js', '.css', 'example.com'])]
+    return list(set(cleaned))
 
 
 def extract_nifs(text: Optional[str]) -> List[str]:
-    """
-    Extrae NIFs/CIFs españoles únicos de un texto usando Regex robusto.
-    """
+    """Extrae NIFs/CIFs españoles únicos de un texto usando Regex y validación de algoritmo."""
     if not text:
         return []
     
-    # Normalizar texto: quitar guiones y puntos
-    text_clean = text.upper().replace("-", "").replace(".", "").replace(" ", "")
+    text_norm = normalize_text_for_cif(text)
     
-    # Patrón NIF/CIF: Letra + 8 dígitos O 8 dígitos + Letra
-    pattern = r"([A-HJ-NP-SUVW]\d{7}[0-9A-J]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])"
-    matches = re.findall(pattern, text_clean)
+    # Patrones específicos de CIF/NIF
+    patterns = [
+        r'(?:CIF|NIF|N\.I\.F\.|C\.I\.F\.|NIF/CIF)[:\s\-—·]*([A-Z0-9]{9})',
+        r'\b([A-Z]\d{7}[0-9A-Z])\b',
+        r'\b(\d{8}[A-Z])\b',
+    ]
     
-    return list(set(matches))
-
-
-def normalize_nif(nif: Optional[str]) -> Optional[str]:
-    """Limpia el NIF de espacios, guiones y puntos."""
-    if not nif:
-        return None
-    return nif.upper().replace("-", "").replace(".", "").replace(" ", "").strip()
+    found = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text_norm)
+        for m in matches:
+            cif_clean = re.sub(r'[^\w]', '', str(m).upper())
+            if len(cif_clean) == 9 and validate_spanish_id(cif_clean):
+                found.append(cif_clean)
+    
+    return list(set(found))
 
 
 def normalize_url(url: Optional[str]) -> Optional[str]:
@@ -106,34 +171,20 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
 
 
 # ─────────────────────────────────────────────
-# Persistencia y Exportación
+# Persistencia
 # ─────────────────────────────────────────────
 
 def save_lead(session: Session, lead_data: dict, logger: logging.Logger) -> bool:
-    """
-    Inserta un lead en la base de datos.
-    Filtro relajado: Se guarda si tiene (Nombre + Web) O (Nombre + Email) O (Nombre + NIF).
-    """
-    nombre = clean_text(lead_data.get("nombre"))
+    """Inserta o actualiza un lead en la base de datos."""
+    nombre = lead_data.get("nombre", "").strip()
     fuente = lead_data.get("fuente", "desconocida")
     web = normalize_url(lead_data.get("web"))
-    
-    # Extraer y normalizar datos
-    nif_raw = lead_data.get("nif") or lead_data.get("nif_raw")
-    email_raw = lead_data.get("email") or lead_data.get("email_raw")
-    
-    nifs = extract_nifs(nif_raw) if nif_raw else []
-    emails = extract_emails(email_raw) if email_raw else []
-    
-    nif = normalize_nif(nifs[0]) if nifs else None
-    email = emails[0] if emails else None
+    nif = lead_data.get("nif")
+    email = lead_data.get("email")
 
-    # FILTRO FLEXIBLE: Al menos Nombre + (Web o NIF o Email)
     if not nombre or not (web or nif or email):
-        logger.warning(f"Lead descartado por falta de datos mínimos: '{nombre}'")
         return False
 
-    # Deduplicación
     existing = session.query(Lead).filter_by(nombre=nombre, fuente=fuente).first()
     if existing:
         updated = False
@@ -146,7 +197,6 @@ def save_lead(session: Session, lead_data: dict, logger: logging.Logger) -> bool
         if not existing.web and web:
             existing.web = web
             updated = True
-        
         if updated:
             session.commit()
             logger.info(f"Lead actualizado: '{nombre}'")
@@ -175,9 +225,7 @@ def export_to_csv(session: Session, output_path: str, logger: logging.Logger) ->
     """Exporta todos los leads a CSV."""
     leads = session.query(Lead).all()
     if not leads:
-        logger.warning("No hay leads para exportar.")
         return
-
     data = [lead.to_dict() for lead in leads]
     df = pd.DataFrame(data)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
