@@ -1,6 +1,6 @@
 # ai-client-scrapper
 
-Scraper automatizado de empresas del sector de **instalaciones solares en España**, con enriquecimiento de subvenciones y panel de control web.
+Scraper automatizado de empresas del sector seleccionado, con enriquecimiento de subvenciones y panel de control web.
 
 ---
 
